@@ -1,4 +1,4 @@
-# 🛵 Sipark: Sistema de Monitoreo de Parqueaderos de Motos
+# Sipark: Sistema de Monitoreo de Parqueaderos de Motos
 
 Sipark es un sistema de monitoreo de parqueaderos de motos basado en **visión artificial**.
 
