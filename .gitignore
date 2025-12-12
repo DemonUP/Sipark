@@ -1,0 +1,58 @@
+# =========================
+# Python / FastAPI
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+*.sqlite3
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+backend/.venv/
+backend/venv/
+backend/env/
+
+# =========================
+# Ultralytics / YOLO
+# =========================
+runs/
+*.pt
+*.onnx
+*.engine
+
+# =========================
+# Variables de entorno / secretos
+# =========================
+.env
+.env.*
+*.pem
+*.key
+
+# =========================
+# Node / React / Vite
+# =========================
+node_modules/
+dist/
+build/
+.vite/
+.cache/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# =========================
+# SO / IDE
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# Otros
+# =========================
+*.tmp
+*.bak
