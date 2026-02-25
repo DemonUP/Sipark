@@ -136,8 +136,6 @@ export default function App() {
 
   return (
     <div className="sipark">
-      {isCritical && <div className="critical-banner"><strong>Estado crítico:</strong>&nbsp;No se ha establecido conexión con el sistema.</div>}
-
       <header className="header">
         <div className="header-inner">
           <div className="brand"><div className="logo">USC</div><div><h1>Sistema Inteligente de Parqueaderos – SIPARK</h1><p>Universidad Santiago de Cali</p></div></div>
