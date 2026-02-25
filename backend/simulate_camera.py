@@ -4,7 +4,7 @@ import cv2
 import requests
 
 API = "http://localhost:8000/api/ingest"
-VIDEO_PATH = "../test_images/video.mp4"
+VIDEO_PATH = "../test_images/img1.png"
 PLAYBACK_SPEED = 1.0  # 1.0 = tiempo real, 2.0 = doble velocidad
 JPEG_QUALITY = 85
 REQUEST_TIMEOUT = 20
