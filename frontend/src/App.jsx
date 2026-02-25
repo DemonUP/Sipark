@@ -1,310 +1,199 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import axios from "axios";
-import "./app.css";
+import { useEffect, useMemo, useRef, useState } from 'react'
+import axios from 'axios'
+import './App.css'
 
-const API = "http://localhost:8000";
+const API = 'http://localhost:8000'
 
 function formatTime(ts) {
-  if (!ts) return "-";
-  return new Date(ts * 1000).toLocaleString();
+  if (!ts) return '-'
+  return new Date(ts * 1000).toLocaleString()
 }
 
 function sortZoneIds(ids) {
   return ids.sort((a, b) => {
-    const na = parseInt(a.replace(/\D/g, ""), 10) || 0;
-    const nb = parseInt(b.replace(/\D/g, ""), 10) || 0;
-    return na - nb;
-  });
+    const na = parseInt(a.replace(/\D/g, ''), 10) || 0
+    const nb = parseInt(b.replace(/\D/g, ''), 10) || 0
+    return na - nb
+  })
 }
 
 function severityFromFree(free) {
-  if (free == null) return "na";
-  if (free <= 1) return "critical";
-  if (free <= 3) return "warn";
-  return "ok";
+  if (free == null) return 'na'
+  if (free <= 1) return 'critical'
+  if (free <= 3) return 'warn'
+  return 'ok'
+}
+
+function StatusBadge({ label, variant }) {
+  return (
+    <span className={`status-badge ${variant}`}>
+      {variant === 'critical' && <span className="status-dot pulse" />}
+      {variant === 'neutral' && <span className="status-dot neutral" />}
+      {label}
+    </span>
+  )
+}
+
+function SummaryCard({ title, value, color, subtitle, showBar, barPercent }) {
+  return (
+    <div className="summary-card">
+      <div className="summary-head">
+        <span className="summary-title">{title}</span>
+      </div>
+      <span className="summary-value" style={{ color }}>{value}</span>
+      {showBar ? (
+        <div className="summary-bar-wrap">
+          <div className="summary-bar">
+            <div className="summary-bar-fill" style={{ width: `${barPercent}%` }} />
+          </div>
+          <span className="summary-note">{barPercent}% de capacidad utilizada</span>
+        </div>
+      ) : (
+        <span className="summary-note">{subtitle}</span>
+      )}
+    </div>
+  )
+}
+
+function SpaceCard({ id, occupied }) {
+  return (
+    <div className="space-card">
+      <div className="space-stripe" style={{ backgroundColor: occupied ? '#C62828' : '#2E7D32' }} />
+      <div className="space-content">
+        <span className="space-id">{id}</span>
+        <span className={`space-icon ${occupied ? 'occupied' : 'free'}`}>{occupied ? '🏍' : '✓'}</span>
+        <span className={`space-state ${occupied ? 'occupied' : 'free'}`}>{occupied ? 'OCUPADO' : 'LIBRE'}</span>
+      </div>
+    </div>
+  )
+}
+
+function Chart({ data, maxY }) {
+  if (!data.length) return <div className="empty-chart">Sin lecturas aún</div>
+  const width = 900
+  const height = 260
+  const pl = 30
+  const pb = 24
+  const pw = width - pl - 20
+  const ph = height - 20 - pb
+  const x = (i) => pl + (i * pw) / Math.max(1, data.length - 1)
+  const y = (v) => 20 + ph - (v / Math.max(1, maxY)) * ph
+  const path = (k) => data.map((d, i) => `${i ? 'L' : 'M'} ${x(i)} ${y(d[k])}`).join(' ')
+
+  return (
+    <svg className="chart-svg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+      {[0.25, 0.5, 0.75].map((g) => <line key={g} x1={pl} y1={20 + ph * g} x2={pl + pw} y2={20 + ph * g} className="grid-line" />)}
+      <path d={path('ocupados')} className="line-oc" />
+      <path d={path('libres')} className="line-free" />
+    </svg>
+  )
 }
 
 export default function App() {
-  const [data, setData] = useState(null);
-  const [conn, setConn] = useState({ ok: false, text: "Conectando..." });
-  const [history, setHistory] = useState([]); // últimos N frames
-  const lastTsRef = useRef(null);
+  const [data, setData] = useState(null)
+  const [conn, setConn] = useState({ ok: false, text: 'Conectando...' })
+  const [history, setHistory] = useState([])
+  const lastTsRef = useRef(null)
 
   useEffect(() => {
     const t = setInterval(async () => {
       try {
-        const res = await axios.get(`${API}/api/last`, { timeout: 2500 });
-        const last = res.data?.data || null;
-        setData(last);
-        setConn({ ok: true, text: last ? "En línea" : "En línea (sin lecturas)" });
+        const res = await axios.get(`${API}/api/last`, { timeout: 2500 })
+        const last = res.data?.data || null
+        setData(last)
+        setConn({ ok: true, text: last ? 'En línea' : 'En línea (sin lecturas)' })
 
-        // guardar historial solo si cambia timestamp
-        const ts = last?.timestamp ?? null;
+        const ts = last?.timestamp ?? null
         if (ts && ts !== lastTsRef.current) {
-          lastTsRef.current = ts;
-          setHistory((prev) => {
-            const next = [
-              ...prev,
-              {
-                ts,
-                free: last?.totals?.spaces_free ?? 0,
-                occ: last?.totals?.spaces_occupied ?? 0,
-                det: last?.totals?.motos_detected ?? 0,
-              },
-            ];
-            return next.slice(-30); // 30 lecturas
-          });
+          lastTsRef.current = ts
+          setHistory((prev) => [...prev, { ts, free: last?.totals?.spaces_free ?? 0, occ: last?.totals?.spaces_occupied ?? 0 }].slice(-30))
         }
       } catch {
-        setConn({ ok: false, text: "Sin conexión" });
+        setConn({ ok: false, text: 'Sin conexión' })
       }
-    }, 1500);
-    return () => clearInterval(t);
-  }, []);
+    }, 1500)
+    return () => clearInterval(t)
+  }, [])
 
-  const totals = data?.totals;
-  const perZone = data?.per_zone || {};
-  const detections = data?.detections || [];
+  const totals = data?.totals
+  const perZone = data?.per_zone || {}
+  const detections = data?.detections || []
 
   const zones = useMemo(() => {
-    const ids = sortZoneIds(Object.keys(perZone));
-    return ids.map((id) => ({
-      id,
-      count: perZone[id],
-      occupied: (perZone[id] || 0) > 0,
-    }));
-  }, [perZone]);
+    const ids = sortZoneIds(Object.keys(perZone))
+    return ids.map((id) => ({ id, count: perZone[id], occupied: (perZone[id] || 0) > 0 }))
+  }, [perZone])
 
   const occupancyPct = useMemo(() => {
-    if (!totals?.spaces_total) return 0;
-    return Math.round((totals.spaces_occupied / totals.spaces_total) * 100);
-  }, [totals]);
+    if (!totals?.spaces_total) return 0
+    return Math.round((totals.spaces_occupied / totals.spaces_total) * 100)
+  }, [totals])
 
-  const severity = useMemo(() => severityFromFree(totals?.spaces_free ?? null), [totals]);
-
-  // (Opcional) Vista de cámara: requiere endpoint /api/last-image (ver patch abajo)
-  const lastImageUrl = data?.timestamp ? `${API}/api/last-image?ts=${data.timestamp}` : null;
+  const severity = useMemo(() => severityFromFree(totals?.spaces_free ?? null), [totals])
+  const isCritical = !conn.ok || severity === 'critical'
+  const lastImageUrl = data?.timestamp ? `${API}/api/last-image?ts=${data.timestamp}` : null
+  const chartData = history.map((h) => ({ libres: h.free, ocupados: h.occ }))
 
   return (
     <div className="sipark">
-      <header className="header">
-        <div className="brand">
-          <div className="logo">S</div>
-          <div className="brandText">
-            <div className="brandTop">
-              <h1>Sipark</h1>
-              <span className={`badge ${conn.ok ? "ok" : "off"}`}>
-                <span className={`dot ${conn.ok ? "ok" : "off"}`} />
-                {conn.text}
-              </span>
-              {severity !== "na" && (
-                <span className={`badge sev ${severity}`}>
-                  {severity === "critical" ? "CRÍTICO" : severity === "warn" ? "ALERTA" : "OK"}
-                </span>
-              )}
-            </div>
-            <div className="sub">
-              Última lectura: <strong>{formatTime(data?.timestamp)}</strong>
-              <span className="sep">•</span>
-              Ocupación: <strong>{occupancyPct}%</strong>
-            </div>
-          </div>
-        </div>
+      {isCritical && <div className="critical-banner"><strong>Estado crítico:</strong>&nbsp;No se ha establecido conexión con el sistema.</div>}
 
-        <div className="quick">
-          <QuickStat label="Libres" value={totals?.spaces_free ?? "-"} tone={severity} />
-          <QuickStat label="Ocupados" value={totals?.spaces_occupied ?? "-"} />
-          <QuickStat label="Detectadas" value={totals?.motos_detected ?? "-"} />
+      <header className="header">
+        <div className="header-inner">
+          <div className="brand"><div className="logo">USC</div><div><h1>Sistema Inteligente de Parqueaderos – SIPARK</h1><p>Universidad Santiago de Cali</p></div></div>
+          <div className="header-right">
+            <StatusBadge label={conn.text} variant={conn.ok ? 'success' : 'neutral'} />
+            <StatusBadge label={severity === 'critical' ? 'Crítico' : severity === 'warn' ? 'Alerta' : 'Estable'} variant={severity === 'critical' ? 'critical' : severity === 'warn' ? 'warning' : 'info'} />
+            <span className="last-read">Última lectura: <strong>{formatTime(data?.timestamp)}</strong></span>
+          </div>
         </div>
       </header>
 
-      <main className="layout">
-        {/* MAIN: Mapa + Cámara + Historial */}
-        <section className="mainCol">
-          <div className="panel">
-            <div className="panelHead">
-              <div>
-                <h2>Mapa de espacios</h2>
-                <p className="muted">Grid “tipo parqueadero”. Ideal para PC.</p>
-              </div>
+      <main className="main">
+        <section className="summary-grid">
+          <SummaryCard title="Ocupación general" value={`${occupancyPct}%`} color="#0F5E9C" showBar barPercent={occupancyPct} />
+          <SummaryCard title="Cupos libres" value={totals?.spaces_free ?? '-'} color="#2E7D32" subtitle="Disponibles en tiempo real" />
+          <SummaryCard title="Cupos ocupados" value={totals?.spaces_occupied ?? '-'} color="#C62828" subtitle={`Detectadas: ${totals?.motos_detected ?? 0} · Fuera de zonas: ${totals?.motos_outside_zone ?? 0}`} />
+          <SummaryCard title="Total de espacios" value={totals?.spaces_total ?? '-'} color="#1F2937" subtitle="Capacidad total del parqueadero" />
+        </section>
 
-              <div className="progressBox">
-                <div className="progressTop">
-                  <span className="muted">Ocupación</span>
-                  <strong>{occupancyPct}%</strong>
-                </div>
-                <div className="bar">
-                  <div className="fill" style={{ width: `${occupancyPct}%` }} />
-                </div>
-              </div>
-            </div>
+        <section className="card">
+          <div className="section-head"><h2>Distribución de espacios</h2></div>
+          <div className="spaces-grid">{zones.map((z) => <SpaceCard key={z.id} id={z.id} occupied={z.occupied} />)}</div>
+        </section>
 
-            <div className="spaceGrid">
-              {zones.length ? (
-                zones.map((z) => (
-                  <div key={z.id} className={`space ${z.occupied ? "occ" : "free"}`}>
-                    <div className="spaceTop">
-                      <span className="spaceId">{z.id}</span>
-                      <span className={`pill ${z.occupied ? "occ" : "free"}`}>
-                        {z.occupied ? "OCUPADO" : "LIBRE"}
-                      </span>
-                    </div>
-                    <div className="spaceCount">{z.count}</div>
-                  </div>
-                ))
-              ) : (
-                <div className="empty">Sin datos aún. Enciende backend + simulador.</div>
-              )}
-            </div>
+        <section className="ops-grid">
+          <div className="card">
+            <div className="section-head"><h2>Última captura del sistema</h2><p>Imagen recibida — {formatTime(data?.timestamp)}</p></div>
+            <div className="camera-wrap"><img src={lastImageUrl || 'https://images.unsplash.com/photo-1767782554091-1908642a77d5?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080'} alt="Cámara" /></div>
           </div>
 
-          <div className="split">
-            <div className="panel">
-              <div className="panelHead">
-                <div>
-                  <h2>Vista de cámara</h2>
-                  <p className="muted">Muestra la última foto recibida (PC se ve brutal).</p>
-                </div>
-              </div>
-
-              {lastImageUrl ? (
-                <div className="cameraBox">
-                  <img className="cameraImg" src={lastImageUrl} alt="Última captura" />
-                </div>
-              ) : (
-                <div className="empty">
-                  Sin imagen. (Activa el endpoint <code>/api/last-image</code> con el patch de abajo)
-                </div>
-              )}
-            </div>
-
-            <div className="panel">
-              <div className="panelHead">
-                <div>
-                  <h2>Historial (últimas lecturas)</h2>
-                  <p className="muted">Tendencia de libres / ocupados.</p>
-                </div>
-              </div>
-
-              <TrendChart history={history} />
-              <div className="trendLegend">
-                <span><i className="sw free" /> Libres</span>
-                <span><i className="sw occ" /> Ocupados</span>
-              </div>
-            </div>
+          <div className="card table-card">
+            <div className="section-head"><h2>Detecciones recientes</h2></div>
+            <table>
+              <thead><tr><th>ID</th><th>VEHÍCULO</th><th>COORDENADAS</th><th>ESPACIO</th></tr></thead>
+              <tbody>
+                {detections.map((d, i) => (
+                  <tr key={i}>
+                    <td>{d.id ?? i + 1}</td>
+                    <td>{d.label ?? d.class_name ?? 'Moto'}</td>
+                    <td><code>{d.coords ?? `(${d.cx ?? 0}, ${d.cy ?? 0})`}</code></td>
+                    <td><span className="zone-tag">{d.space ?? d.zone_id ?? '-'}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
 
-        {/* SIDEBAR: Métricas + Detecciones + Debug */}
-        <aside className="sideCol">
-          <div className="panel">
-            <h2>Métricas</h2>
+        <section className="card">
+          <div className="section-head"><h2>Tendencia de ocupación reciente</h2></div>
+          <Chart data={chartData} maxY={Math.max(8, totals?.spaces_total ?? 8)} />
+          <div className="legend"><span><i className="occ" />Ocupados</span><span><i className="free" />Libres</span></div>
+        </section>
 
-            <div className="metrics">
-              <Metric big label="Cupos libres" value={totals?.spaces_free ?? "-"} tone={severity} />
-              <Metric label="Ocupados" value={totals?.spaces_occupied ?? "-"} />
-              <Metric label="Totales" value={totals?.spaces_total ?? "-"} />
-              <Metric label="Fuera de zonas" value={totals?.motos_outside_zones ?? "-"} />
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panelHead">
-              <div>
-                <h2>Detecciones recientes</h2>
-                <p className="muted">Top 12 del último frame</p>
-              </div>
-            </div>
-
-            <div className="detList">
-              {detections.length ? (
-                detections.slice(0, 12).map((d, i) => (
-                  <div className="detItem" key={i}>
-                    <div>
-                      <div className="detTitle">Moto #{i + 1}</div>
-                      <div className="muted detSub">
-                        ({Math.round(d.center[0])}, {Math.round(d.center[1])})
-                      </div>
-                    </div>
-                    <span className={`tag ${d.zone ? "ok" : "off"}`}>
-                      {d.zone ?? "SIN ZONA"}
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <div className="muted">Sin detecciones aún.</div>
-              )}
-            </div>
-          </div>
-
-          <details className="panel details">
-            <summary>
-              <div>
-                <h2>JSON (debug)</h2>
-                <p className="muted">Clic para abrir/cerrar</p>
-              </div>
-            </summary>
-            <pre className="json">{data ? JSON.stringify(data, null, 2) : "Sin datos."}</pre>
-          </details>
-        </aside>
+        <footer className="footer">SIPARK · Sistema Inteligente de Parqueaderos · Universidad Santiago de Cali · 2026</footer>
       </main>
-
-      <footer className="footer">
-        <span>Sipark · PC/Tablet Control Room</span>
-        <span className="muted">Backend: {API}</span>
-      </footer>
     </div>
-  );
-}
-
-function QuickStat({ label, value, tone }) {
-  return (
-    <div className="q">
-      <div className="qk">{label}</div>
-      <div className={`qv ${tone || ""}`}>{value}</div>
-    </div>
-  );
-}
-
-function Metric({ label, value, big, tone }) {
-  return (
-    <div className={`m ${big ? "big" : ""} ${tone ? `tone-${tone}` : ""}`}>
-      <div className="ml">{label}</div>
-      <div className="mv">{value}</div>
-    </div>
-  );
-}
-
-/** SVG mini chart sin librerías */
-function TrendChart({ history }) {
-  const w = 520, h = 160, pad = 14;
-  if (!history?.length) {
-    return <div className="empty">Aún no hay historial.</div>;
-  }
-
-  const xs = history.map((_, i) => i);
-  const maxY = Math.max(...history.map((p) => Math.max(p.free, p.occ)), 1);
-
-  const xTo = (i) => pad + (i * (w - pad * 2)) / Math.max(xs.length - 1, 1);
-  const yTo = (v) => h - pad - (v * (h - pad * 2)) / maxY;
-
-  const line = (key) =>
-    history
-      .map((p, i) => `${xTo(i)},${yTo(p[key])}`)
-      .join(" ");
-
-  return (
-    <div className="trend">
-      <svg viewBox={`0 0 ${w} ${h}`} className="trendSvg" role="img" aria-label="Trend">
-        {/* grid */}
-        {[0.25, 0.5, 0.75].map((t, idx) => {
-          const y = pad + t * (h - pad * 2);
-          return <line key={idx} x1={pad} x2={w - pad} y1={y} y2={y} className="gridLine" />;
-        })}
-
-        <polyline points={line("free")} className="lineFree" />
-        <polyline points={line("occ")} className="lineOcc" />
-      </svg>
-    </div>
-  );
+  )
 }
