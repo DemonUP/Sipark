@@ -136,7 +136,6 @@ export default function App() {
 
   return (
     <div className="sipark">
-      {isCritical && <div className="critical-banner"><strong>Estado crítico:</strong>&nbsp;No se ha establecido conexión con el sistema.</div>}
 
       <header className="header">
         <div className="header-inner">
