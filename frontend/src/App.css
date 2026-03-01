@@ -147,7 +147,6 @@ body{
   animation:ledPulse .45s ease-in-out infinite;
 }
 
-.ts-wrap{}
 .ts-time{
   font-family:'JetBrains Mono',monospace;
   font-size:19px;font-weight:700;
@@ -537,7 +536,6 @@ body{
 
 /* side stats next to donut */
 .donut-stats{display:flex;flex-direction:column;gap:10px;flex:1}
-.ds-item{}
 .ds-label{
   font-family:'DM Sans',sans-serif;
   font-size:9.5px;font-weight:600;
@@ -574,7 +572,6 @@ body{
 }
 
 /* sparkline history */
-.spark-section{}
 .spark-head{
   display:flex;align-items:center;justify-content:space-between;
   margin-bottom:8px;
