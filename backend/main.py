@@ -13,6 +13,7 @@ from ultralytics import YOLO
 from shapely.geometry import Polygon, Point
 
 from debug_routes import router as debug_router
+from lab_routes import router as lab_router
 
 
 APP_NAME = "Sipark"
@@ -87,6 +88,7 @@ VALID_CLASS_IDS = [NAME2ID[n] for n in VALID_NAMES if n in NAME2ID]
 app.state.lock = asyncio.Lock()
 app.state.last_payload = None
 app.state.last_image_jpg = None
+app.state.model = model
 
 
 # ==========================
@@ -505,3 +507,4 @@ async def ingest(file: UploadFile = File(...), conf: float = DEFAULT_CONF):
 
 
 app.include_router(debug_router, prefix="/api")
+app.include_router(lab_router, prefix="/api")
