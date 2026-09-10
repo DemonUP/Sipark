@@ -50,6 +50,7 @@ frontend/build/
 Thumbs.db
 .vscode/
 .idea/
+.claude/
 
 # =========================
 # Otros
