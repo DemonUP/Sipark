@@ -85,13 +85,13 @@ async def debug_last_overlay(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
     else:
-        # fallback: si no hay payload, recalcula detecciones (más lento)
-        tile_predict = request.app.state.tile_predict
+        # fallback: si no hay payload, recalcula detecciones (mas lento)
         box_poly = request.app.state.box_poly
+        result = await request.app.state.run_detection(img)
 
-        boxes, cls, scores = tile_predict(img, conf=0.03, imgsz=1280, tile=640, overlap=0.35, nms_iou=0.65)
-
-        for (x1, y1, x2, y2), sc in zip(boxes, scores):
+        for det in result.detections:
+            x1, y1, x2, y2 = det.box
+            sc = det.score
             bp = box_poly(float(x1), float(y1), float(x2), float(y2))
             zid = None
             best_ratio = 0.0

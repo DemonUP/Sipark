@@ -1,4 +1,6 @@
 {
+  "_comment": "Los poligonos se dibujaron sobre una imagen de esta vista. Si la camara entrega otra geometria, el servicio avisa en vez de publicar una ocupacion sin sentido. Ponga la capacidad real de cada zona con \"capacity\".",
+  "view": "superior",
   "image_width": 1024,
   "image_height": 1024,
   "zones": [

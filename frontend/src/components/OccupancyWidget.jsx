@@ -12,7 +12,6 @@ export default function OccupancyWidget({ history, totals, sev, occupancyPct, is
 
   const okC = isDark ? "#10b981" : "#059669";
   const critC = isDark ? "#ef4444" : "#dc2626";
-  const warnC = isDark ? "#f59e0b" : "#b45309";
 
   const W = 480;
   const H = 80;

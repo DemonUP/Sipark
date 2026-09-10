@@ -364,3 +364,48 @@
     font-size: 11px;
   }
 }
+
+/* Keep technical details below the original gallery and collapsed by default. */
+.lab-audit summary {
+  padding: 12px 16px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.lab-audit-body {
+  padding: 0 16px 16px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.lab-notice,
+.lab-toolbar-body > .lab-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.lab-workspace > *,
+.lab-table-row > *,
+.lab-table-head > * {
+  min-width: 0;
+}
+
+.lab-detail-preview img,
+.lab-thumb {
+  object-fit: contain;
+}
+
+.lab-table-head,
+.lab-table-row {
+  grid-template-columns: 22px 42px minmax(55px, 1fr) minmax(45px, 0.8fr) minmax(48px, 1fr);
+  gap: 6px;
+  padding: 10px;
+  overflow-wrap: anywhere;
+}

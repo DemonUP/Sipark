@@ -3,6 +3,15 @@ import axios from "axios";
 import "./LabPage.css";
 
 const API = "http://localhost:8000";
+// Motivos de descarte que reporta el nucleo de deteccion compartido.
+const FILTER_LABELS = {
+  nms: "Cajas superpuestas",
+  contenida: "Parte de otra moto",
+  envolvente: "Caja que engloba a varias",
+  cortada_debil: "Vista parcial sin confianza",
+  escala: "Tamaño incoherente con la escena",
+  confidence: "Confianza baja",
+};
 
 const toneForConfidence = (value) => {
   if (value >= 0.7) return "good";
@@ -11,17 +20,17 @@ const toneForConfidence = (value) => {
 };
 
 const lightingBadge = (value) => {
-  if (value === "Dia") return "SUN";
-  if (value === "Tarde") return "PM";
-  if (value === "Noche") return "MOON";
+  if (value === "Brillo alto") return "Alta";
+  if (value === "Brillo medio") return "Media";
+  if (value === "Brillo bajo") return "Baja";
   return "--";
 };
 
-const imageSrcFor = (filename, analysis, conf, minArea) => {
+const imageSrcFor = (filename, analysis) => {
   if (!filename) return null;
   const encoded = encodeURIComponent(filename);
   if (!analysis) return `${API}/api/lab/images/${encoded}`;
-  return `${API}/api/lab/annotated/${encoded}?conf=${conf}&min_area=${minArea}`;
+  return `${API}/api/lab/annotated/${encoded}?conf=${analysis.params.conf}&min_area=${analysis.params.min_area}`;
 };
 
 export default function LabPage() {
@@ -55,7 +64,8 @@ export default function LabPage() {
   }, [analysis]);
 
   const selectedImage = selected ? imageMap.get(selected) ?? null : null;
-  const selectedPreview = selected ? imageSrcFor(selected, analysis, conf, minArea) : null;
+  const selectedPreview = selected ? imageSrcFor(selected, analysis) : null;
+  const parametersChanged = analysis && (conf !== analysis.params.conf || minArea !== analysis.params.min_area);
 
   const predominantAngle = useMemo(() => {
     if (!selectedImage?.detections?.length) return "--";
@@ -92,7 +102,7 @@ export default function LabPage() {
     setExporting(true);
     try {
       const res = await axios.get(`${API}/api/lab/report`, {
-        params: { conf, min_area: minArea },
+        params: { conf: analysis.params.conf, min_area: analysis.params.min_area },
         responseType: "blob",
         timeout: 300000,
       });
@@ -134,12 +144,13 @@ export default function LabPage() {
             <button className="lab-btn primary" onClick={runAnalysis} disabled={loading || !images.length}>
               {loading ? "Analizando..." : "Ejecutar Analisis"}
             </button>
-            <button className="lab-btn" onClick={exportReport} disabled={exporting || !images.length}>
+            <button className="lab-btn" onClick={exportReport} disabled={exporting || loading || !analysis}>
               {exporting ? "Exportando..." : "Exportar Reporte"}
             </button>
           </div>
           {error && <div className="lab-error">{error}</div>}
           {exportError && <div className="lab-error">{exportError}</div>}
+          {parametersChanged && <p className="lab-notice">Hay parámetros nuevos. Ejecuta el análisis para aplicarlos; las imágenes y el reporte corresponden al resultado anterior.</p>}
         </div>
       </section>
 
@@ -158,7 +169,7 @@ export default function LabPage() {
             <strong>{analysis?.total_detections ?? "--"}</strong>
           </div>
           <div className="lab-kpi">
-            <span>Tasa de deteccion</span>
+            <span>Imagenes con deteccion</span>
             <strong>{analysis ? `${Math.round((analysis.kpis?.detection_rate ?? 0) * 100)}%` : "--"}</strong>
           </div>
           <div className="lab-kpi">
@@ -175,6 +186,7 @@ export default function LabPage() {
           </div>
         </div>
       </section>
+
 
       <section className="lab-workspace">
         <div className="lab-grid panel">
@@ -201,7 +213,7 @@ export default function LabPage() {
                     type="button"
                   >
                     <div className="lab-thumb-wrap">
-                      <img className="lab-thumb" src={imageSrcFor(filename, analysis, conf, minArea)} alt={filename} />
+                      <img className="lab-thumb" src={imageSrcFor(filename, analysis)} alt={filename} />
                     </div>
                     <div className="lab-card-meta">
                       <div className="lab-card-top">
@@ -260,7 +272,7 @@ export default function LabPage() {
                 <div className="lab-table-head">
                   <span>#</span>
                   <span>Conf</span>
-                  <span>Angulo</span>
+                  <span>Forma caja</span>
                   <span>Area</span>
                   <span>Luz</span>
                 </div>
@@ -284,6 +296,18 @@ export default function LabPage() {
           )}
         </aside>
       </section>
+      {analysis && (
+        <details className="panel lab-audit">
+          <summary>Detalles del análisis</summary>
+          <div className="lab-audit-body">
+            <p>{analysis.audit?.candidates ?? 0} candidatos YOLO · {analysis.total_detections} aceptados · {analysis.audit?.skipped_images?.length ?? 0} imágenes ilegibles · {analysis.audit?.elapsed_seconds ?? 0} s</p>
+            <ul>{analysis.methodology?.notes?.map((note) => <li key={note}>{note}</li>)}</ul>
+            <p>Descartes: {Object.entries(analysis.audit?.rejected_by_reason ?? {}).map(([reason, count]) => `${FILTER_LABELS[reason] ?? reason}: ${count}`).join(" · ") || "Ninguno"}</p>
+            {analysis.images?.some((item) => item.inference_limit_reached) && <p>Alguna imagen alcanzó el límite de candidatos del detector; el conteo podría estar incompleto.</p>}
+          </div>
+        </details>
+      )}
+
     </div>
   );
 }

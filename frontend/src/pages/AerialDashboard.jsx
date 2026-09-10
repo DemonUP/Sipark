@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import OccupancyWidget from "../components/OccupancyWidget";
 
+const VIEWPOINT_LABELS = {
+  superior: "Aerea (superior)",
+  oblicua: "Oblicua (a nivel)",
+  indeterminado: "Sin determinar",
+};
+
 const API = "http://localhost:8000";
 
 const fmtTime = (ts) =>
@@ -81,7 +87,13 @@ export default function AerialDashboard({ isDark }) {
   }, []);
 
   const totals = data?.totals;
-  const perZone = data?.per_zone || {};
+  const scene = data?.scene;
+  const diagnostics = data?.diagnostics;
+  // El backend avisa cuando la vista que entrega la camara no corresponde a la
+  // que se uso para dibujar las zonas. En ese caso la ocupacion por zona no
+  // describe cupos, y mostrarla como un dato firme seria enganoso.
+  const zonesApply = diagnostics?.zones_apply !== false;
+  const perZone = useMemo(() => data?.per_zone || {}, [data?.per_zone]);
   const detections = data?.detections || [];
   const zones = useMemo(
     () =>
@@ -106,13 +118,16 @@ export default function AerialDashboard({ isDark }) {
     na: "Sistema de Monitoreo",
   }[sev];
 
+  // Las motos detectadas se miden en la imagen y se informan siempre; los cupos
+  // dependen de que las zonas correspondan a esta camara.
+  const zoneValue = (value) => (zonesApply ? value ?? "--" : "n/d");
   const kpis = [
-    { label: "Cupos Libres", value: totals?.spaces_free ?? "--", tone: sev },
-    { label: "Ocupados", value: totals?.spaces_occupied ?? "--", tone: "accent" },
+    { label: "Cupos Libres", value: zoneValue(totals?.spaces_free), tone: zonesApply ? sev : "" },
+    { label: "Ocupados", value: zoneValue(totals?.spaces_occupied), tone: zonesApply ? "accent" : "" },
     { label: "Total Cupos", value: totals?.spaces_total ?? "--", tone: "" },
     { label: "Detectadas", value: totals?.motos_detected ?? "--", tone: "" },
-    { label: "Fuera Zonas", value: totals?.motos_outside_zones ?? "--", tone: "" },
-    { label: "Ocupacion", value: `${occupancyPct}%`, tone: sev },
+    { label: "Fuera Zonas", value: zoneValue(totals?.motos_outside_zones), tone: "" },
+    { label: "Ocupacion", value: zonesApply ? `${occupancyPct}%` : "n/d", tone: zonesApply ? sev : "" },
   ];
 
   return (
@@ -138,6 +153,36 @@ export default function AerialDashboard({ isDark }) {
           </div>
         </div>
       </section>
+
+      {!zonesApply && (
+        <section className="geo-warning">
+          <span className="geo-warning-tag">Ocupacion no representativa</span>
+          {(diagnostics?.notes ?? []).map((note) => (
+            <p key={note}>{note}</p>
+          ))}
+        </section>
+      )}
+
+      {scene && (
+        <section className="geo-bar">
+          <div className="geo-item">
+            <span className="geo-lbl">Vista detectada</span>
+            <span className="geo-val">{VIEWPOINT_LABELS[scene.viewpoint] ?? scene.viewpoint}</span>
+          </div>
+          <div className="geo-item">
+            <span className="geo-lbl">Moto tipica</span>
+            <span className="geo-val">{scene.median_side_px} px</span>
+          </div>
+          <div className="geo-item">
+            <span className="geo-lbl">Mosaicos</span>
+            <span className="geo-val">{scene.tiles_used}</span>
+          </div>
+          <div className="geo-item">
+            <span className="geo-lbl">Proceso</span>
+            <span className="geo-val">{diagnostics?.elapsed_ms ?? "--"} ms</span>
+          </div>
+        </section>
+      )}
 
       <div className="layout">
         <div className="panel zone-map-panel">

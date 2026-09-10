@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from io import BytesIO
@@ -14,21 +16,20 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from ultralytics import YOLO
 
+import detection
+
 logger = logging.getLogger("sipark.lab")
 
 router = APIRouter(tags=["lab"])
 
 LAB_CONF = 0.25
-LAB_MIN_SCORE = 0.25
+
+# `min_area` se conserva solo por compatibilidad de la API y de la cache: el
+# frontend lo envia en /lab/annotated y /lab/report. Ya no filtra nada. El
+# nucleo descarta duplicados, fragmentos y cajas incoherentes con la escala que
+# midio en la propia imagen, de modo que un area minima fija sobraba y excluia
+# motos pequenas, lejanas u ocluidas.
 LAB_MIN_BBOX_AREA = 5000
-LAB_IMGSZ = 640
-LAB_NMS_IOU = 0.45
-LAB_MIN_SIDE = 40
-LAB_MIN_AREA_RATIO = 0.002
-LAB_MAX_AREA_RATIO = 0.65
-LAB_MIN_ASPECT_RATIO = 0.38
-LAB_MAX_ASPECT_RATIO = 2.8
-LAB_MAX_DETECTIONS_PER_IMAGE = 6
 
 BASE_DIR = Path(__file__).resolve().parent
 TEST_IMAGES_DIR = BASE_DIR / "test_images"
@@ -53,23 +54,23 @@ def _get_lab_model() -> YOLO:
 _analysis_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lab_yolo")
 _analysis_cache = {"key": None, "value": None}
 _analysis_state_lock = asyncio.Lock()
-_analysis_inflight: dict[tuple[float, int], asyncio.Task] = {}
+_analysis_inflight: dict[tuple, asyncio.Task] = {}
 
 
 def _lighting_class(mean_brightness: float) -> str:
     if mean_brightness < 80:
-        return "Noche"
+        return "Brillo bajo"
     if mean_brightness <= 160:
-        return "Tarde"
-    return "Dia"
+        return "Brillo medio"
+    return "Brillo alto"
 
 
 def _angle_class(aspect_ratio: float) -> str:
     if aspect_ratio > 1.3:
-        return "Lateral"
+        return "Horizontal"
     if aspect_ratio < 0.7:
-        return "Trasera/Vertical"
-    return "Frontal"
+        return "Vertical"
+    return "Compacta"
 
 
 def _resolve_image_path(filename: str) -> Path:
@@ -94,53 +95,26 @@ def _find_motorcycle_class_id(model) -> int | None:
     return None
 
 
-def _nms_boxes(boxes: list[list[float]], scores: list[float], iou_thr: float = LAB_NMS_IOU) -> list[int]:
-    if not boxes:
-        return []
-    boxes_xywh = [[x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1)] for x1, y1, x2, y2 in boxes]
-    idxs = cv2.dnn.NMSBoxes(boxes_xywh, scores, score_threshold=0.0, nms_threshold=float(iou_thr))
-    if idxs is None or len(idxs) == 0:
-        return []
-    return [int(i) for i in np.array(idxs).reshape(-1)]
+def _lab_params(conf: float) -> detection.DetectParams:
+    """Parametros del nucleo para el laboratorio.
 
-
-def _contains_ratio(box_a: list[float], box_b: list[float]) -> float:
-    ax1, ay1, ax2, ay2 = box_a
-    bx1, by1, bx2, by2 = box_b
-    inter_x1 = max(ax1, bx1)
-    inter_y1 = max(ay1, by1)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-    inter_w = max(0.0, inter_x2 - inter_x1)
-    inter_h = max(0.0, inter_y2 - inter_y1)
-    inter_area = inter_w * inter_h
-    b_area = max(1.0, (bx2 - bx1) * (by2 - by1))
-    return inter_area / b_area
-
-
-def _should_keep_detection(
-    score: float,
-    width: float,
-    height: float,
-    bbox_area: float,
-    image_area: float,
-    aspect_ratio: float,
-    min_area: int,
-) -> bool:
-    dynamic_min_area = max(float(min_area), image_area * LAB_MIN_AREA_RATIO)
-    if score < LAB_MIN_SCORE:
-        return False
-    if width < LAB_MIN_SIDE or height < LAB_MIN_SIDE:
-        return False
-    if bbox_area < dynamic_min_area:
-        return False
-    if bbox_area > image_area * LAB_MAX_AREA_RATIO:
-        return False
-    if aspect_ratio < LAB_MIN_ASPECT_RATIO or aspect_ratio > LAB_MAX_ASPECT_RATIO:
-        return False
-    if score < 0.45 and bbox_area < dynamic_min_area * 1.6:
-        return False
-    return True
+    Se parte de los valores por defecto del nucleo y se leen las mismas
+    variables de entorno que usa produccion, para que el laboratorio mida el
+    mismo pipeline que corre el monitoreo. La unica diferencia deliberada es la
+    confianza, que llega por la API y se usa tal cual, sin elevarla.
+    """
+    return detection.DetectParams(
+        conf=float(conf),
+        truncated_conf=float(os.getenv("SIPARK_TRUNCATED_CONF", "0.45")),
+        iou=float(os.getenv("SIPARK_IOU", "0.60")),
+        probe_imgsz=int(os.getenv("SIPARK_PROBE_IMGSZ", "960")),
+        tile_imgsz=int(os.getenv("SIPARK_TILE_IMGSZ", "640")),
+        tile_overlap=float(os.getenv("SIPARK_OVERLAP", "0.35")),
+        merge_iou=float(os.getenv("SIPARK_MERGE_IOU", "0.55")),
+        max_tiles=int(os.getenv("SIPARK_MAX_TILES", "60")),
+        preprocess=os.getenv("SIPARK_PREPROCESS", "0") == "1",
+        class_names=("motorcycle",),
+    )
 
 
 def _confidence_band(score: float) -> str:
@@ -152,14 +126,24 @@ def _confidence_band(score: float) -> str:
 
 
 def _analyze_dataset_sync(model, conf: float, min_area: int) -> dict:
+    started = time.perf_counter()
     image_files = _list_image_files()
     motorcycle_class_id = _find_motorcycle_class_id(model)
+    if motorcycle_class_id is None:
+        raise HTTPException(status_code=422, detail="El modelo no contiene la clase motorcycle")
+
+    params = _lab_params(conf)
 
     images: list[dict] = []
-    angle_distribution = {"Frontal": 0, "Lateral": 0, "Trasera/Vertical": 0}
-    lighting_distribution = {"Dia": 0, "Tarde": 0, "Noche": 0}
+    angle_distribution = {"Compacta": 0, "Horizontal": 0, "Vertical": 0}
+    lighting_distribution = {"Brillo alto": 0, "Brillo medio": 0, "Brillo bajo": 0}
+    viewpoint_distribution = {"superior": 0, "oblicua": 0, "indeterminado": 0}
+    skipped_images = []
+    rejected_totals = Counter()
     confidence_bands = {"Alta (>=0.80)": 0, "Media (0.60-0.79)": 0, "Baja (<0.60)": 0}
     total_detections = 0
+    total_tiles = 0
+    total_inference_calls = 0
     confidence_values: list[float] = []
     bbox_areas: list[float] = []
     images_with_detections = 0
@@ -168,6 +152,7 @@ def _analyze_dataset_sync(model, conf: float, min_area: int) -> dict:
         image_path = TEST_IMAGES_DIR / filename
         img_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if img_bgr is None:
+            skipped_images.append(filename)
             continue
 
         image_h, image_w = img_bgr.shape[:2]
@@ -177,73 +162,67 @@ def _analyze_dataset_sync(model, conf: float, min_area: int) -> dict:
         lighting_class = _lighting_class(mean_brightness)
         lighting_distribution[lighting_class] += 1
 
-        predict_kwargs = {
-            "conf": max(float(conf), float(LAB_MIN_SCORE)),
-            "imgsz": int(LAB_IMGSZ),
-            "verbose": False,
-            "iou": 0.50,
-            "agnostic_nms": False,
-            "classes": [motorcycle_class_id] if motorcycle_class_id is not None else None,
-        }
-        result = model.predict(img_bgr, **predict_kwargs)[0]
+        # Nucleo comun: la misma inferencia que corre el monitoreo. Antes el
+        # laboratorio predecia por su cuenta a 640 sobre la imagen completa y
+        # aplicaba filtros de lado, area y proporcion propios, asi que sus
+        # numeros no validaban produccion.
+        res = detection.detect(model, img_bgr, params)
+        scene = res.scene
 
-        raw_detections: list[dict] = []
-        if result.boxes is not None and len(result.boxes) > 0:
-            boxes = result.boxes.xyxy.cpu().numpy().astype(np.float32)
-            scores = result.boxes.conf.cpu().numpy().astype(np.float32)
-            classes = result.boxes.cls.cpu().numpy().astype(np.int32)
-
-            for bbox, score, class_id in zip(boxes, scores, classes):
-                x1, y1, x2, y2 = [float(v) for v in bbox]
-                width = max(0.0, x2 - x1)
-                height = max(1.0, y2 - y1)
-                bbox_area = float(width * height)
-                aspect_ratio = float(width / height)
-                class_name = str(model.names.get(int(class_id), class_id))
-
-                if class_name.lower() != "motorcycle":
-                    continue
-                if not _should_keep_detection(
-                    float(score), width, height, bbox_area, image_area, aspect_ratio, int(min_area)
-                ):
-                    continue
-
-                raw_detections.append(
-                    {
-                        "bbox": [x1, y1, x2, y2],
-                        "bbox_area_px": bbox_area,
-                        "confidence": float(score),
-                        "class_name": class_name,
-                        "aspect_ratio": aspect_ratio,
-                        "angle_class": _angle_class(aspect_ratio),
-                    }
-                )
+        # `res.dropped` incluye las cortadas que si se aceptaron, que no son un
+        # descarte: se separan para no contarlas como rechazo.
+        #
+        # Compromiso aceptado: los motivos ya no son los del laboratorio
+        # (min_side, min_area, max_area, aspect_ratio) sino los de la fusion del
+        # nucleo. El frontend traduce los motivos que conoce y muestra el resto
+        # tal cual (`FILTER_LABELS[reason] ?? reason` en LabPage.jsx), asi que no
+        # se rompe; las etiquetas nuevas se pueden anadir alli cuando convenga.
+        rejected = Counter({
+            reason: int(count)
+            for reason, count in res.dropped.items()
+            if reason != "cortadas_aceptadas" and count
+        })
+        accepted_truncated = int(res.dropped.get("cortadas_aceptadas", 0))
+        candidate_count = int(res.candidates)
+        total_tiles += int(res.tiles_used)
+        total_inference_calls += int(res.inference_calls)
 
         kept_detections: list[dict] = []
-        if raw_detections:
-            keep_idxs = _nms_boxes([d["bbox"] for d in raw_detections], [d["confidence"] for d in raw_detections], LAB_NMS_IOU)
-            nms_kept = [raw_detections[idx] for idx in keep_idxs]
-            nms_kept.sort(key=lambda item: (item["confidence"], item["bbox_area_px"]), reverse=True)
+        for det in res.detections:
+            x1, y1, x2, y2 = (float(v) for v in det.box)
+            width = max(0.0, x2 - x1)
+            height = max(1.0, y2 - y1)
+            bbox_area = float(width * height)
+            aspect_ratio = float(width / height)
+            kept_detections.append(
+                {
+                    "bbox": [x1, y1, x2, y2],
+                    "bbox_area_px": bbox_area,
+                    "confidence": float(det.score),
+                    "class_name": str(det.cls_name or model.names.get(int(det.cls), det.cls)),
+                    "aspect_ratio": aspect_ratio,
+                    # Clave historica: describe la forma de la caja, no el
+                    # angulo real de la moto.
+                    "angle_class": _angle_class(aspect_ratio),
+                    "truncated": bool(det.truncated),
+                    "source": str(det.source),
+                }
+            )
 
-            for det in nms_kept:
-                if any(_contains_ratio(prev["bbox"], det["bbox"]) >= 0.82 for prev in kept_detections):
-                    continue
-                kept_detections.append(det)
-                if len(kept_detections) >= LAB_MAX_DETECTIONS_PER_IMAGE:
-                    break
-
-        for idx, detection in enumerate(kept_detections):
-            detection["detection_idx"] = idx
-            detection["bbox"] = [round(v, 2) for v in detection["bbox"]]
-            detection["bbox_area_px"] = round(detection["bbox_area_px"], 2)
-            detection["confidence"] = round(detection["confidence"], 4)
-            detection["aspect_ratio"] = round(detection["aspect_ratio"], 4)
-            angle_distribution[detection["angle_class"]] += 1
-            confidence_values.append(detection["confidence"])
-            bbox_areas.append(detection["bbox_area_px"])
-            confidence_bands[_confidence_band(detection["confidence"])] += 1
+        for idx, det_item in enumerate(kept_detections):
+            det_item["detection_idx"] = idx
+            det_item["bbox"] = [round(v, 2) for v in det_item["bbox"]]
+            det_item["bbox_area_px"] = round(det_item["bbox_area_px"], 2)
+            det_item["confidence"] = round(det_item["confidence"], 4)
+            det_item["aspect_ratio"] = round(det_item["aspect_ratio"], 4)
+            angle_distribution[det_item["angle_class"]] += 1
+            confidence_values.append(det_item["confidence"])
+            bbox_areas.append(det_item["bbox_area_px"])
+            confidence_bands[_confidence_band(det_item["confidence"])] += 1
 
         detection_count = len(kept_detections)
+        rejected_totals.update(rejected)
+        viewpoint_distribution[scene.viewpoint] = viewpoint_distribution.get(scene.viewpoint, 0) + 1
         bbox_coverage_pct = round(
             (sum(det["bbox_area_px"] for det in kept_detections) / image_area) * 100, 2
         ) if image_area else 0.0
@@ -262,6 +241,22 @@ def _analyze_dataset_sync(model, conf: float, min_area: int) -> dict:
         images.append(
             {
                 "filename": filename,
+                "candidate_count": candidate_count,
+                "rejected_by_reason": dict(rejected),
+                # El nucleo limita a `max_det` cajas por llamada al detector.
+                # Si el total de candidatos no llega a ese tope, ninguna llamada
+                # pudo saturarse; si lo alcanza, alguna pudo truncar su salida.
+                "inference_limit_reached": candidate_count >= int(params.max_det),
+                # Geometria medida en esta foto: dice como se adapto el sistema.
+                "viewpoint": scene.viewpoint,
+                "relative_slope": round(float(scene.relative_slope), 4),
+                "median_side_px": round(float(scene.median_side), 2),
+                "scene_reliable": bool(scene.reliable),
+                "probe_count": int(scene.probe_count),
+                "tiles_used": int(res.tiles_used),
+                "inference_calls": int(res.inference_calls),
+                "truncated_candidates": int(res.truncated_candidates),
+                "accepted_truncated": accepted_truncated,
                 "image_w": int(image_w),
                 "image_h": int(image_h),
                 "mean_brightness": round(mean_brightness, 2),
@@ -291,11 +286,54 @@ def _analyze_dataset_sync(model, conf: float, min_area: int) -> dict:
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "params": {
             "conf": round(float(conf), 4),
+            # Se conserva por compatibilidad de la API y de la cache. Ya no
+            # filtra: no hay area minima en el nucleo comun.
             "min_area": int(min_area),
-            "imgsz": LAB_IMGSZ,
-            "min_score": LAB_MIN_SCORE,
-            "nms_iou": LAB_NMS_IOU,
-            "max_detections_per_image": LAB_MAX_DETECTIONS_PER_IMAGE,
+            "min_area_aplica": False,
+            "model": _LAB_MODEL_PATH,
+            "nucleo": "detection.detect (compartido con el monitoreo)",
+            "probe_imgsz": int(params.probe_imgsz),
+            "probe_conf": round(float(params.probe_conf), 4),
+            "tile_imgsz": int(params.tile_imgsz),
+            "tile_overlap": round(float(params.tile_overlap), 4),
+            "target_obj_frac": round(float(params.target_obj_frac), 4),
+            "bands": int(params.bands),
+            "scales": int(params.scales),
+            "max_tiles": int(params.max_tiles),
+            "iou": round(float(params.iou), 4),
+            "merge_iou": round(float(params.merge_iou), 4),
+            "contain_thr": round(float(params.contain_thr), 4),
+            "scale_tol": round(float(params.scale_tol), 4),
+            "truncated_conf": round(float(params.truncated_conf), 4),
+            "max_det": int(params.max_det),
+            "preprocess": bool(params.preprocess),
+            "class_names": ", ".join(params.class_names),
+        },
+        "methodology": {
+            "version": 3,
+            "notes": [
+                "La deteccion usa el nucleo comun detection.detect, el mismo del monitoreo: un resultado del laboratorio si describe el pipeline real.",
+                "El nucleo mide la geometria en cada imagen (vista superior u oblicua) y elige por franjas el tamano de mosaico; la vista y los mosaicos usados se reportan por imagen.",
+                "Se eliminaron los filtros de lado minimo, area minima, area maxima y proporcion: excluian motos pequenas, lejanas u ocluidas. El parametro min_area se conserva en la API pero no filtra.",
+                "La confianza solicitada se usa tal cual. El sondeo inicial de escena corre con su propia confianza (probe_conf) porque sirve para medir la escala, no para aceptar cajas.",
+                "La confianza del modelo no mide precision ni recall; se requieren anotaciones reales para evaluarlos.",
+                "La tasa de deteccion es la fraccion de imagenes con alguna deteccion aceptada.",
+                "El brillo describe pixeles, no la hora del dia. La forma de la caja no determina el angulo de la moto.",
+                "Los descartes provienen de la fusion del nucleo: duplicados entre mosaicos (nms), cajas contenidas en otra (contenida), tamano incoherente con la escala medida (escala) y vistas parciales con poca confianza (cortada_debil).",
+                "Los candidatos son las cajas de todos los mosaicos antes de fusionar, asi que una misma moto aporta varios candidatos.",
+                "La cobertura suma areas de cajas; puede superar 100% cuando se solapan.",
+            ],
+        },
+        "audit": {
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "files_found": len(image_files),
+            "skipped_images": skipped_images,
+            "candidates": sum(img["candidate_count"] for img in images),
+            "rejected_by_reason": dict(rejected_totals),
+            "tiles_used": total_tiles,
+            "inference_calls": total_inference_calls,
+            "truncated_candidates": sum(img["truncated_candidates"] for img in images),
+            "accepted_truncated": sum(img["accepted_truncated"] for img in images),
         },
         "total_images": total_images,
         "total_detections": total_detections,
@@ -315,53 +353,51 @@ def _analyze_dataset_sync(model, conf: float, min_area: int) -> dict:
             "angle_distribution": angle_distribution,
             "lighting_distribution": lighting_distribution,
             "confidence_bands": confidence_bands,
+            "viewpoint_distribution": viewpoint_distribution,
+            "avg_tiles_per_image": round(total_tiles / total_images, 2) if total_images else 0.0,
         },
     }
     return analysis
 
 
+def _dataset_signature() -> tuple:
+    return tuple(
+        (name, stat.st_size, stat.st_mtime_ns)
+        for name in _list_image_files()
+        for stat in [(TEST_IMAGES_DIR / name).stat()]
+    )
+
+
 async def _get_or_run_analysis(request: Request, conf: float, min_area: int) -> dict:
-    cache_key = (round(float(conf), 4), int(min_area))
+    signature = await asyncio.to_thread(_dataset_signature)
+    cache_key = (float(conf), int(min_area), signature)
 
-    async with _analysis_state_lock:
-        if _analysis_cache["key"] == cache_key and _analysis_cache["value"] is not None:
-            logger.info("Lab cache hit conf=%s min_area=%s", conf, min_area)
-            return _analysis_cache["value"]
+    async def run_and_cache() -> dict:
+        try:
+            def run_job() -> dict:
+                return _analyze_dataset_sync(_get_lab_model(), conf, min_area)
 
-        existing_task = _analysis_inflight.get(cache_key)
-        if existing_task is None:
-            loop = asyncio.get_running_loop()
-            logger.info("Lab analysis start conf=%s min_area=%s", conf, min_area)
-
-            def _run_analysis_job() -> dict:
-                model = _get_lab_model()
-                return _analyze_dataset_sync(model, conf, min_area)
-
-            existing_task = asyncio.ensure_future(
-                loop.run_in_executor(_analysis_executor, _run_analysis_job)
-            )
-            _analysis_inflight[cache_key] = existing_task
-        else:
-            logger.info("Lab analysis join inflight conf=%s min_area=%s", conf, min_area)
-
-    try:
-        analysis = await existing_task
-    finally:
-        async with _analysis_state_lock:
-            if _analysis_inflight.get(cache_key) is existing_task:
+            analysis = await asyncio.get_running_loop().run_in_executor(_analysis_executor, run_job)
+            # Do not publish a result if the dataset changed during inference.
+            if await asyncio.to_thread(_dataset_signature) != signature:
+                raise HTTPException(status_code=409, detail="Las imagenes cambiaron durante el analisis. Ejecutelo de nuevo.")
+            async with _analysis_state_lock:
+                _analysis_cache.update(key=cache_key, value=analysis)
+            return analysis
+        finally:
+            async with _analysis_state_lock:
                 _analysis_inflight.pop(cache_key, None)
 
     async with _analysis_state_lock:
-        _analysis_cache["key"] = cache_key
-        _analysis_cache["value"] = analysis
-
-    logger.info(
-        "Lab analysis done conf=%s min_area=%s detections=%s",
-        conf,
-        min_area,
-        analysis.get("total_detections"),
-    )
-    return analysis
+        if _analysis_cache["key"] == cache_key and _analysis_cache["value"] is not None:
+            return _analysis_cache["value"]
+        task = _analysis_inflight.get(cache_key)
+        if task is None:
+            task = asyncio.create_task(run_and_cache())
+            # Retrieve failures even when every HTTP caller has disconnected.
+            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            _analysis_inflight[cache_key] = task
+    return await asyncio.shield(task)
 
 
 def _draw_detection_overlay(image_path: Path, image_analysis: dict) -> bytes:
@@ -410,9 +446,14 @@ def _build_report_bytes(analysis: dict) -> bytes:
                 "Cobertura (%)": image["bbox_coverage_pct"],
                 "Brillo Medio": image["mean_brightness"],
                 "Iluminacion": image["lighting_class"],
-                "Angulo Predominante": image["predominant_angle"],
+                "Forma Predominante": image["predominant_angle"],
                 "Resolucion": f"{image['image_w']} x {image['image_h']}",
                 "Tiene Deteccion": "Si" if image["detection_count"] > 0 else "No",
+                # Geometria medida por el nucleo en esta imagen.
+                "Vista": image.get("viewpoint", "indeterminado"),
+                "Pendiente Relativa": image.get("relative_slope", 0.0),
+                "Lado Mediano (px)": image.get("median_side_px", 0.0),
+                "Mosaicos": image.get("tiles_used", 0),
             }
         )
         for detection in image["detections"]:
@@ -429,14 +470,20 @@ def _build_report_bytes(analysis: dict) -> bytes:
                     "Confianza": detection["confidence"],
                     "Clase": detection["class_name"],
                     "Aspect Ratio": detection["aspect_ratio"],
-                    "Angulo Estimado": detection["angle_class"],
+                    "Forma de Caja": detection["angle_class"],
                     "Brillo Medio": image["mean_brightness"],
                     "Iluminacion": image["lighting_class"],
                     "Cobertura Imagen (%)": image["bbox_coverage_pct"],
+                    "Vista Parcial": "Si" if detection.get("truncated") else "No",
+                    "Vista": image.get("viewpoint", "indeterminado"),
                 }
             )
 
-    image_df = pd.DataFrame(image_rows)
+    image_df = pd.DataFrame(image_rows, columns=[
+        "Archivo", "Detecciones", "Confianza Promedio", "Cobertura (%)", "Brillo Medio",
+        "Iluminacion", "Forma Predominante", "Resolucion", "Tiene Deteccion",
+        "Vista", "Pendiente Relativa", "Lado Mediano (px)", "Mosaicos",
+    ])
     detail_df = pd.DataFrame(
         detail_rows,
         columns=[
@@ -450,10 +497,12 @@ def _build_report_bytes(analysis: dict) -> bytes:
             "Confianza",
             "Clase",
             "Aspect Ratio",
-            "Angulo Estimado",
+            "Forma de Caja",
             "Brillo Medio",
             "Iluminacion",
             "Cobertura Imagen (%)",
+            "Vista Parcial",
+            "Vista",
         ],
     )
 
@@ -481,7 +530,7 @@ def _build_report_bytes(analysis: dict) -> bytes:
             .reset_index()
         )
         angle_summary_df = (
-            image_df.groupby("Angulo Predominante", dropna=False)
+            image_df.groupby("Forma Predominante", dropna=False)
             .agg(
                 Imagenes=("Archivo", "count"),
                 Detecciones=("Detecciones", "sum"),
@@ -499,7 +548,7 @@ def _build_report_bytes(analysis: dict) -> bytes:
             columns=["Iluminacion", "Imagenes", "ImagenesConDet", "Detecciones", "ConfianzaMedia", "CoberturaMediaPct", "BrilloMedio"]
         )
         angle_summary_df = pd.DataFrame(
-            columns=["Angulo Predominante", "Imagenes", "Detecciones", "ConfianzaMedia", "CoberturaMediaPct"]
+            columns=["Forma Predominante", "Imagenes", "Detecciones", "ConfianzaMedia", "CoberturaMediaPct"]
         )
 
     if not detail_df.empty:
@@ -524,6 +573,29 @@ def _build_report_bytes(analysis: dict) -> bytes:
         top_detections_df = pd.DataFrame(columns=detail_df.columns)
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        pd.DataFrame({"Notas de interpretacion": analysis["methodology"]["notes"]}).to_excel(
+            writer, sheet_name="Metodologia", index=False
+        )
+        writer.sheets["Metodologia"].set_column("A:A", 110)
+        audit_rows = [
+            {"Archivo": item["filename"], "Candidatos (mosaicos)": item["candidate_count"],
+             "Aceptadas": item["detection_count"], "Limite del detector alcanzado": item["inference_limit_reached"],
+             # Geometria con la que el nucleo se adapto a esta imagen.
+             "Vista": item.get("viewpoint", "indeterminado"),
+             "Pendiente Relativa": item.get("relative_slope", 0.0),
+             "Lado Mediano (px)": item.get("median_side_px", 0.0),
+             "Geometria Fiable": item.get("scene_reliable", False),
+             "Mosaicos": item.get("tiles_used", 0),
+             "Llamadas Inferencia": item.get("inference_calls", 0),
+             "Cortadas Candidatas": item.get("truncated_candidates", 0),
+             "Cortadas Aceptadas": item.get("accepted_truncated", 0),
+             **item["rejected_by_reason"]}
+            for item in analysis["images"]
+        ]
+        pd.DataFrame(audit_rows).to_excel(writer, sheet_name="Auditoria Filtros", index=False)
+        pd.DataFrame({"Archivo ilegible": analysis["audit"]["skipped_images"]}).to_excel(
+            writer, sheet_name="Imagenes Omitidas", index=False
+        )
         workbook = writer.book
 
         title_fmt = workbook.add_format({"bold": True, "font_size": 20, "font_color": "#0F172A"})
@@ -555,9 +627,11 @@ def _build_report_bytes(analysis: dict) -> bytes:
         dashboard.write(
             "A3",
             (
-                f"Parametros: conf={analysis['params']['conf']} | min_area={analysis['params']['min_area']} | "
-                f"imgsz={analysis['params']['imgsz']} | nms_iou={analysis['params']['nms_iou']} | "
-                f"max_det_img={analysis['params']['max_detections_per_image']}"
+                f"Parametros: conf={analysis['params']['conf']} | "
+                f"min_area={analysis['params']['min_area']} (no filtra) | "
+                f"sondeo={analysis['params']['probe_imgsz']} | mosaico={analysis['params']['tile_imgsz']} | "
+                f"solape={analysis['params']['tile_overlap']} | fusion_iou={analysis['params']['merge_iou']} | "
+                f"max_mosaicos={analysis['params']['max_tiles']}"
             ),
             subtitle_fmt,
         )
@@ -579,8 +653,8 @@ def _build_report_bytes(analysis: dict) -> bytes:
         dashboard.write("A12", "Resumen Ejecutivo", section_fmt)
         executive_note = (
             f"Se procesaron {analysis['total_images']} imagenes close-up con {analysis['total_detections']} detecciones "
-            f"validadas. {kpis['images_with_detections']} imagenes presentaron al menos una deteccion y "
-            f"{kpis['images_without_detections']} no presentaron objetos validos. La confianza media fue "
+            f"aceptadas por los filtros. {kpis['images_with_detections']} imagenes presentaron al menos una deteccion y "
+            f"{kpis['images_without_detections']} no presentaron detecciones aceptadas. La confianza media fue "
             f"{kpis['avg_confidence']:.2f}, la mediana {kpis['median_confidence']:.2f} y la cobertura media "
             f"de bounding boxes fue {kpis['avg_bbox_coverage_pct']:.2f}%."
         )
@@ -604,29 +678,39 @@ def _build_report_bytes(analysis: dict) -> bytes:
             dashboard.write(f"D{row_idx}", label, label_fmt)
             dashboard.write(f"E{row_idx}", kpis["confidence_bands"][label], integer_fmt)
 
-        dashboard.write("A26", "Distribucion por Angulo", section_fmt)
-        angle_labels = ["Frontal", "Lateral", "Trasera/Vertical"]
+        dashboard.write("A26", "Distribucion por Forma", section_fmt)
+        angle_labels = ["Compacta", "Horizontal", "Vertical"]
         for row_idx, label in enumerate(angle_labels, start=27):
             dashboard.write(f"A{row_idx}", label, label_fmt)
             dashboard.write(f"B{row_idx}", kpis["angle_distribution"][label], integer_fmt)
 
         dashboard.write("D26", "Distribucion por Iluminacion", section_fmt)
-        lighting_labels = ["Dia", "Tarde", "Noche"]
+        lighting_labels = ["Brillo alto", "Brillo medio", "Brillo bajo"]
         for row_idx, label in enumerate(lighting_labels, start=27):
             dashboard.write(f"D{row_idx}", label, label_fmt)
             dashboard.write(f"E{row_idx}", kpis["lighting_distribution"][label], integer_fmt)
 
+        # Geometria medida: cuantas imagenes resultaron vista superior, oblicua o
+        # no medible, y cuantos mosaicos costo en promedio.
+        dashboard.write("A31", "Geometria Medida", section_fmt)
+        viewpoint_labels = ["superior", "oblicua", "indeterminado"]
+        for row_idx, label in enumerate(viewpoint_labels, start=32):
+            dashboard.write(f"A{row_idx}", label, label_fmt)
+            dashboard.write(f"B{row_idx}", kpis.get("viewpoint_distribution", {}).get(label, 0), integer_fmt)
+        dashboard.write("A35", "Mosaicos por imagen", label_fmt)
+        dashboard.write("B35", kpis.get("avg_tiles_per_image", 0.0), value_fmt)
+
         angle_chart = workbook.add_chart({"type": "column"})
         angle_chart.add_series(
             {
-                "name": "Angulo",
+                "name": "Forma",
                 "categories": "=Dashboard!$A$27:$A$29",
                 "values": "=Dashboard!$B$27:$B$29",
                 "fill": {"color": "#2563EB"},
                 "border": {"none": True},
             }
         )
-        angle_chart.set_title({"name": "Distribucion por angulo"})
+        angle_chart.set_title({"name": "Distribucion por forma"})
         angle_chart.set_legend({"none": True})
         angle_chart.set_size({"width": 420, "height": 240})
         dashboard.insert_chart("G5", angle_chart)
@@ -708,8 +792,8 @@ def _build_report_bytes(analysis: dict) -> bytes:
             values = [column] + lighting_summary_df[column].astype(str).tolist() if not lighting_summary_df.empty else [column]
             lighting_sheet.set_column(col_idx, col_idx, min(max(len(v) for v in values) + 2, 28))
 
-        angle_summary_df.to_excel(writer, sheet_name="Analisis Angulo", index=False)
-        angle_sheet = writer.sheets["Analisis Angulo"]
+        angle_summary_df.to_excel(writer, sheet_name="Analisis Forma", index=False)
+        angle_sheet = writer.sheets["Analisis Forma"]
         angle_sheet.freeze_panes(1, 0)
         for col_idx, column in enumerate(angle_summary_df.columns):
             angle_sheet.write(0, col_idx, column, header_fmt)

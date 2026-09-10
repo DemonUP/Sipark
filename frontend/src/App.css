@@ -901,3 +901,57 @@ details[open] .dbg-chevron{transform:rotate(180deg)}
   .occ-pct{font-size:22px}
   .ts-time{font-size:16px}
 }
+
+/* ============================================================
+   Geometria medida y aviso de zonas
+   El backend estima la vista de la camara en cada imagen. Cuando no
+   corresponde a la vista con la que se dibujaron las zonas, la ocupacion
+   deja de describir cupos y se avisa en lugar de mostrar un numero firme.
+   ============================================================ */
+.geo-bar{
+  display:flex;flex-wrap:wrap;align-items:stretch;
+  margin-top:10px;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:8px;
+  box-shadow:var(--shadow-md);
+  overflow:hidden;
+}
+.geo-item{
+  display:flex;flex-direction:column;justify-content:center;
+  flex:1 1 140px;min-width:0;
+  padding:8px 14px;
+  border-right:1px solid var(--border);
+}
+.geo-item:last-child{border-right:none}
+.geo-lbl{
+  font-family:'DM Sans',sans-serif;
+  font-size:9.5px;font-weight:600;
+  color:var(--text-dim);text-transform:uppercase;
+  letter-spacing:.4px;white-space:nowrap;
+}
+.geo-val{
+  font-family:'JetBrains Mono',monospace;
+  font-size:14px;font-weight:700;
+  color:var(--text);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.geo-warning{
+  margin-top:10px;padding:11px 14px;
+  background:var(--warn-bg);
+  border:1px solid var(--warn);
+  border-radius:8px;
+}
+.geo-warning-tag{
+  display:inline-block;
+  font-family:'DM Sans',sans-serif;
+  font-size:9.5px;font-weight:700;
+  color:var(--warn);text-transform:uppercase;
+  letter-spacing:.5px;
+}
+.geo-warning p{
+  margin:5px 0 0;
+  font-family:'DM Sans',sans-serif;
+  font-size:12px;line-height:1.5;
+  color:var(--text);
+}

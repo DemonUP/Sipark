@@ -1,0 +1,19 @@
+# Dependencias del backend de Sipark, fijadas a las versiones verificadas en
+# este entorno (Python 3.14, solo CPU). Instalacion:
+#   python -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# torch llega como dependencia de ultralytics. En una maquina sin GPU conviene
+# instalar antes la variante de CPU para no descargar las bibliotecas de CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32
+numpy==2.5.3
+opencv-python==5.0.0.93
+shapely==2.1.2
+ultralytics==8.4.146
+requests==2.34.2
+pandas==3.0.5
+XlsxWriter==3.2.9
+httpx==0.28.1
